@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from itertools import combinations
-from random import shuffle
+from random import choice, shuffle
 from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
@@ -69,18 +69,38 @@ class DataCollatorForMultipleChoice(DataCollatorWithPadding):
   def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
     batch_size: int = len(features)
     texts_to_choose: List[int] = range(len(features[0]["input_ids"]))
+    dropped_features: List[Dict[str, Any]] = []
+    torch_columns = ['input_ids', 'attention_mask', 'labels']
     for idx_b in range(batch_size):
       labels_int: List[int] = features[idx_b]['labels'].to(torch.int).tolist()
       true_texts: List[int] = np.flatnonzero(labels_int).tolist()
-      false_texts: List[int] = list(set(texts_to_choose) - set(true_texts))
-      all_combs: List[List[int]] = []
-      for t_id in true_texts:
-        combs: List[List[int]] = combinations(false_texts, self.num_choices)
-        combs = [list(comb) + [t_id] for comb in combs]
-        all_combs.extend(combs)
-      # choose combination by idx
-      shuffle(all_combs[self.idx])
-      choosed_comb = torch.tensor(all_combs[self.idx], dtype=torch.int)
+      if "best_texts" in features[idx_b]:
+        if -1 not in features[idx_b]["best_texts"].tolist():
+          chosed_true = choice(true_texts)
+          choosed_comb: List[int] = features[idx_b]["best_texts"].tolist()
+          choosed_comb.append(chosed_true)
+          shuffle(choosed_comb)
+          choosed_comb = torch.tensor(choosed_comb, dtype=torch.int)
+        else:
+          false_texts: List[int] = list(set(texts_to_choose) - set(true_texts))
+          all_combs: List[List[int]] = []
+          for t_id in true_texts:
+            combs: List[List[int]] = combinations(false_texts, self.num_choices)
+            combs = [list(comb) + [t_id] for comb in combs]
+            all_combs.extend(combs)
+          # choose combination by idx
+          shuffle(all_combs[self.idx])
+          choosed_comb = torch.tensor(all_combs[self.idx], dtype=torch.int)
+      else:
+        false_texts: List[int] = list(set(texts_to_choose) - set(true_texts))
+        all_combs: List[List[int]] = []
+        for t_id in true_texts:
+          combs: List[List[int]] = combinations(false_texts, self.num_choices)
+          combs = [list(comb) + [t_id] for comb in combs]
+          all_combs.extend(combs)
+        # choose combination by idx
+        shuffle(all_combs[self.idx])
+        choosed_comb = torch.tensor(all_combs[self.idx], dtype=torch.int)
       model_input = {
           'input_ids':
               torch.index_select(features[idx_b]['input_ids'], 0, choosed_comb),
@@ -94,6 +114,11 @@ class DataCollatorForMultipleChoice(DataCollatorWithPadding):
               torch.index_select(features[idx_b]['labels'], 0, choosed_comb)
       }
       features[idx_b].update(model_input)
+      all_keys = list(features[idx_b].keys())
+      dropped_features.append({})
+      for cl in all_keys:
+        if cl not in torch_columns:
+          dropped_features[idx_b][cl] = features[idx_b].pop(cl)
 
     # flatten features
     flattened_features: List[List[Dict[str, Any]]] = [[{
@@ -114,5 +139,14 @@ class DataCollatorForMultipleChoice(DataCollatorWithPadding):
         k: v.view(batch_size, self.num_choices + 1, -1)
         for k, v in batch.items()
     }
+    # for i in range(batch_size):
+    #   for k, v in dropped_features[i].items():
+    #     if k not in batch:
+    #       batch[k] = []
+    #       batch[k].append(v)
+    #     elif isinstance(v, list):
+    #       batch[k].extend(v)
+    #     else:
+    #       batch[k].append(v)
     batch['labels'] = batch['labels'].view(batch_size, self.num_choices + 1)
     return batch

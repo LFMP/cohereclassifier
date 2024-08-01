@@ -399,6 +399,7 @@ for idx_iter in range(args.iterations):
       num_train_epochs=1,
       logging_steps=1,
       label_names=["labels"],
+      remove_unused_columns=False,
       report_to="tensorboard",
   )
 
@@ -421,7 +422,7 @@ for idx_iter in range(args.iterations):
   trainer.train()
   metrics = trainer.evaluate(dataset["val"])
   trainer.log_metrics("val", metrics)
-  model_name = f"af_models/model_{idx_iter}_{args.iterations}_{args.num_texts}_{args.num_combinations}"
+  model_name = f"af_models/new_model_{idx_iter}_{args.iterations}_{args.num_texts}_{args.num_combinations}"
   if args.lokr:
     model.save_pretrained(model_name, save_embedding_layers=True)
   else:
@@ -451,8 +452,10 @@ for idx_iter in range(args.iterations):
     best_tokenized_dataset = best_dataset(best_tokenized_dataset,
                                           new_tokenized_dataset)
   best_tokenized_dataset.save_to_disk(
-      f"data/af_out_{args.iterations}_{args.num_texts}_{args.num_combinations}")
+      f"data/new_af_out_{args.iterations}_{args.num_texts}_{args.num_combinations}"
+  )
 
 best_tokenized_dataset.remove_columns(["input_ids", "attention_mask"])
 best_tokenized_dataset.save_to_disk(
-    f"data/af_out_{args.iterations}_{args.num_texts}_{args.num_combinations}")
+    f"data/new_af_out_{args.iterations}_{args.num_texts}_{args.num_combinations}"
+)
