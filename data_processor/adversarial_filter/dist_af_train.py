@@ -20,6 +20,8 @@ from transformers import (AutoModelForMultipleChoice, AutoTokenizer,
                           TrainingArguments)
 from transformers.trainer_utils import EvalPrediction
 
+import wandb
+
 
 def argument_parser():
   parser = argparse.ArgumentParser()
@@ -190,7 +192,9 @@ def compute_meteor(dataset1, dataset2):
 
 
 def compute_metrics(eval_pred: EvalPrediction) -> Dict[str, Any]:
-  predictions, labels = eval_pred
+  predictions = eval_pred.predictions
+  labels = eval_pred.label_ids
+  inputs = eval_pred.input
   max_logits = np.array(predictions).max(axis=1).reshape(-1, 1)
   predictions = np.where(predictions == max_logits, 1, 0).flatten()
   labels = np.array(labels).flatten()
@@ -205,6 +209,12 @@ def compute_metrics(eval_pred: EvalPrediction) -> Dict[str, Any]:
   metrics["accuracy"] = accuracy_score(labels, predictions)
   for idx, acc in enumerate(acc_by_class):
     metrics[f"accuracy_class_{idx}"] = acc
+  # compute meteor
+  true_texts = inputs['labels'].argwhere().flatten()
+  reference = [inputs[i] for i in true_texts] * len(inputs)
+  preds = [inputs[i] for i in range(len(inputs)) if i not in true_texts]
+  meteor_score = meteor.compute(predictions=preds, references=reference)
+  metrics["meteor"] = meteor_score['meteor']
   return metrics
 
 
@@ -215,6 +225,8 @@ def best_dataset(dataset1: Dataset,
   # return True if logits of texts in dataset2['best_texts'] are greater
   # than the logits of texts in dataset1['best_texts']
   meteor_left, meteor_right = compute_meteor(dataset1, dataset2)
+  wandb.log({"previous_meteor_score": meteor_right})
+  wandb.log({"new_meteor_score": meteor_right})
   logger.success(f"Mean meteor of left: {meteor_left}")
   logger.success(f"Mean meteor of right: {meteor_right}")
   if criteria.lower() == "sum":
@@ -231,6 +243,9 @@ def best_dataset(dataset1: Dataset,
             best_on_left += 1
           else:
             best_on_right += 1
+    wandb.log({"sum_logits": best_on_right})
+    logger.success(f"Sum of previous: {np.mean(best_on_left)}")
+    logger.success(f"Sum of actual: {np.mean(best_on_right)}")
     if best_on_left > best_on_right:
       logger.success("Previous dataset is better")
       return dataset1
@@ -260,6 +275,9 @@ def best_dataset(dataset1: Dataset,
                     len(logits_right)) if logits_right != [] else 0
       best_on_left.append(mean_left)
       best_on_right.append(mean_right)
+    wandb.log({"mean_logits": np.mean(best_on_right)})
+    logger.success(f"Mean of previous: {np.mean(best_on_left)}")
+    logger.success(f"Mean of actual: {np.mean(best_on_right)}")
     if np.median(best_on_left) > np.median(best_on_right):
       logger.success("Previous dataset is better")
       return dataset1
@@ -325,12 +343,22 @@ if args.debug:
   args.iterations = 3
   args.combinations = 2
 
+tags = [
+    f"{args.iterations}_iterations", f"{args.num_texts}_out_texts",
+    f"{args.num_combinations}_combinations",
+    f"{args.generated_texts}_generated_texts"
+]
+if args.lokr:
+  tags.append("lokr")
+
+run = wandb.init(project=f"adversarial_filtering", tags=tags)
+
 for idx_iter in range(args.iterations):
-  logger.info("Loading model")
+  logger.info("Loading base model")
   base_model = AutoModelForMultipleChoice.from_pretrained(
       "severinsimmler/xlm-roberta-longformer-base-16384",
       torch_dtype=torch.bfloat16).to("cuda")
-  logger.success(f"Model loaded")
+  logger.success(f"Base model loaded")
 
   logger.info("Resizing token embeddings of model")
   base_model.resize_token_embeddings(len(tokenizer))
@@ -345,7 +373,6 @@ for idx_iter in range(args.iterations):
       "query", "key", "value", "query_global", "key_global", "value_global",
       "classifier", "pooler"
   ]
-
   if args.lokr:
     logger.info("Creating Lokr model")
     config = LoKrConfig(
@@ -381,6 +408,10 @@ for idx_iter in range(args.iterations):
   })
   logger.success("Dataset splitted")
 
+  run = wandb.init(project=f"adversarial_filtering",
+                   tags=tags,
+                   name=f"af_{idx_iter}_of_{args.iterations}")
+
   # Define training arguments
   training_args = TrainingArguments(
       output_dir=
@@ -400,7 +431,8 @@ for idx_iter in range(args.iterations):
       logging_steps=1,
       label_names=["labels"],
       remove_unused_columns=False,
-      report_to="tensorboard",
+      include_inputs_for_metrics=True,
+      report_to="wandb",
   )
 
   trainer = WeightedTrainer(
@@ -419,15 +451,18 @@ for idx_iter in range(args.iterations):
   )
 
   # train model
+  logger.info(f"Training model {idx_iter}")
   trainer.train()
+  logger.info(f"Evaluating model {idx_iter}")
   metrics = trainer.evaluate(dataset["val"])
-  trainer.log_metrics("val", metrics)
+  wandb.log(metrics)
+  logger.success(f"Model {idx_iter} evaluated")
   model_name = f"af_models/new_model_{idx_iter}_{args.iterations}_{args.num_texts}_{args.num_combinations}"
   if args.lokr:
     model.save_pretrained(model_name, save_embedding_layers=True)
   else:
     trainer.save_model(model_name)
-  logger.success("Model trained and saved")
+  logger.success(f"Model {idx_iter} trained and saved")
   if args.lokr:
     logger.info("Loading base model and merging with PEFT model")
     model = trainer.model.base_model
@@ -440,21 +475,18 @@ for idx_iter in range(args.iterations):
     model.merge_and_unload()
     model.save_pretrained(model_name, save_embedding_layers=True)
     model.eval()
-    logger.success("Model merged and saved")
+    logger.success(f"Model {idx_iter} merged and saved")
   else:
     model = AutoModelForMultipleChoice.from_pretrained(
         model_name, torch_dtype=torch.bfloat16).to("cuda")
     model.eval()
   new_tokenized_dataset = update_dataset(dataset)
-  if idx_iter == 0:
-    best_tokenized_dataset = new_tokenized_dataset
-  else:
-    best_tokenized_dataset = best_dataset(best_tokenized_dataset,
-                                          new_tokenized_dataset)
+  best_tokenized_dataset = best_dataset(best_tokenized_dataset,
+                                        new_tokenized_dataset)
   best_tokenized_dataset.save_to_disk(
       f"data/new_af_out_{args.iterations}_{args.num_texts}_{args.num_combinations}"
   )
-
+wandb.finish()
 best_tokenized_dataset.remove_columns(["input_ids", "attention_mask"])
 best_tokenized_dataset.save_to_disk(
     f"data/new_af_out_{args.iterations}_{args.num_texts}_{args.num_combinations}"
