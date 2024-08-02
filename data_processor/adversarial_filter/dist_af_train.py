@@ -10,7 +10,7 @@ import torch
 from data_collator import DataCollatorForMultipleChoice
 from datasets import Dataset, DatasetDict
 from loguru import logger
-from peft import LoKrConfig, PeftModel, TaskType, get_peft_model
+from peft import LoKrConfig, PeftModel, get_peft_model
 from processor import batched_encode_function, batched_preprocess_function
 from sklearn.metrics import (accuracy_score, balanced_accuracy_score,
                              confusion_matrix, f1_score)
@@ -47,7 +47,6 @@ def argument_parser():
   parser.add_argument('--num_combinations', type=int, default=10)
   parser.add_argument('--lokr', action='store_true')
   parser.add_argument('--debug', action='store_true')
-  parser.add_argument('--seed', type=int, default=42)
   args = parser.parse_args()
   return args
 
@@ -192,29 +191,27 @@ def compute_meteor(dataset1, dataset2):
 
 
 def compute_metrics(eval_pred: EvalPrediction) -> Dict[str, Any]:
+  # get preds and labels
   predictions = eval_pred.predictions
   labels = eval_pred.label_ids
-  inputs = eval_pred.input
+  # flatten the predictions and labels
   max_logits = np.array(predictions).max(axis=1).reshape(-1, 1)
-  predictions = np.where(predictions == max_logits, 1, 0).flatten()
-  labels = np.array(labels).flatten()
-  matrix = confusion_matrix(labels, predictions)
+  preds = np.where(predictions == max_logits, 1, 0).flatten()
+  flattened_labels = np.array(labels).flatten()
+  # compute the confusion matrix and acc by class
+  matrix = confusion_matrix(flattened_labels, preds)
   acc_by_class = np.divide(matrix.diagonal(), matrix.sum(axis=1))
+  # compute the metrics and put them in a dictionary for return
   metrics = {}
-  metrics["balanced_accuracy"] = balanced_accuracy_score(labels, predictions)
-  metrics["f1"] = f1_score(labels,
-                           predictions,
+  metrics["balanced_accuracy"] = balanced_accuracy_score(
+      flattened_labels, preds)
+  metrics["f1"] = f1_score(flattened_labels,
+                           preds,
                            average="weighted",
                            zero_division=0.0)
-  metrics["accuracy"] = accuracy_score(labels, predictions)
+  metrics["accuracy"] = accuracy_score(flattened_labels, preds)
   for idx, acc in enumerate(acc_by_class):
     metrics[f"accuracy_class_{idx}"] = acc
-  # compute meteor
-  true_texts = inputs['labels'].argwhere().flatten()
-  reference = [inputs[i] for i in true_texts] * len(inputs)
-  preds = [inputs[i] for i in range(len(inputs)) if i not in true_texts]
-  meteor_score = meteor.compute(predictions=preds, references=reference)
-  metrics["meteor"] = meteor_score['meteor']
   return metrics
 
 
@@ -338,16 +335,18 @@ else:
   logger.success("Dataset tokenized")
   best_tokenized_dataset = tokenized_dataset
 
-if args.debug:
-  logger.info("Debug mode")
-  args.iterations = 3
-  args.combinations = 2
-
 tags = [
     f"{args.iterations}_iterations", f"{args.num_texts}_out_texts",
     f"{args.num_combinations}_combinations",
     f"{args.generated_texts}_generated_texts"
 ]
+
+if args.debug:
+  logger.info("Debug mode")
+  args.iterations = 3
+  args.combinations = 2
+  tags.append("debug")
+
 if args.lokr:
   tags.append("lokr")
 
@@ -397,10 +396,10 @@ for idx_iter in range(args.iterations):
   logger.info("Splitting dataset")
   # 70% train, 30% test + validation
   train_testvalid: DatasetDict = best_tokenized_dataset.train_test_split(
-      test_size=0.3, seed=np.random.randint(0, 1000))
+      test_size=0.3)
   # Split the 30% test + valid in half test, half valid
   test_valid: DatasetDict = train_testvalid['test'].train_test_split(
-      test_size=0.5, seed=np.random.randint(0, 1000))
+      test_size=0.5)
   dataset: DatasetDict = DatasetDict({
       'train': train_testvalid['train'],
       'test': test_valid['test'],
@@ -431,8 +430,9 @@ for idx_iter in range(args.iterations):
       logging_steps=1,
       label_names=["labels"],
       remove_unused_columns=False,
-      include_inputs_for_metrics=True,
       report_to="wandb",
+      seed=np.random.randint(0, 1000),
+      run_name=f"af_{idx_iter}_of_{args.iterations}",
   )
 
   trainer = WeightedTrainer(
@@ -484,10 +484,10 @@ for idx_iter in range(args.iterations):
   best_tokenized_dataset = best_dataset(best_tokenized_dataset,
                                         new_tokenized_dataset)
   best_tokenized_dataset.save_to_disk(
-      f"data/af_out_{args.iterations}_{args.num_texts}_{args.num_combinations}"
+      f"data/new_af_out_{args.iterations}_{args.num_texts}_{args.num_combinations}"
   )
 wandb.finish()
 best_tokenized_dataset.remove_columns(["input_ids", "attention_mask"])
 best_tokenized_dataset.save_to_disk(
-    f"data/af_out_{args.iterations}_{args.num_texts}_{args.num_combinations}"
+    f"data/new_af_out_{args.iterations}_{args.num_texts}_{args.num_combinations}"
 )
