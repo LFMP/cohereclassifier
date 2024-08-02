@@ -457,7 +457,7 @@ for idx_iter in range(args.iterations):
   metrics = trainer.evaluate(dataset["val"])
   wandb.log(metrics)
   logger.success(f"Model {idx_iter} evaluated")
-  model_name = f"af_models/new_model_{idx_iter}_{args.iterations}_{args.num_texts}_{args.num_combinations}"
+  model_name = f"af_models/model_{idx_iter}_{args.iterations}_{args.num_texts}_{args.num_combinations}"
   if args.lokr:
     model.save_pretrained(model_name, save_embedding_layers=True)
   else:
@@ -484,10 +484,10 @@ for idx_iter in range(args.iterations):
   best_tokenized_dataset = best_dataset(best_tokenized_dataset,
                                         new_tokenized_dataset)
   best_tokenized_dataset.save_to_disk(
-      f"data/new_af_out_{args.iterations}_{args.num_texts}_{args.num_combinations}"
+      f"data/af_out_{args.iterations}_{args.num_texts}_{args.num_combinations}"
   )
 wandb.finish()
 best_tokenized_dataset.remove_columns(["input_ids", "attention_mask"])
 best_tokenized_dataset.save_to_disk(
-    f"data/new_af_out_{args.iterations}_{args.num_texts}_{args.num_combinations}"
+    f"data/af_out_{args.iterations}_{args.num_texts}_{args.num_combinations}"
 )
