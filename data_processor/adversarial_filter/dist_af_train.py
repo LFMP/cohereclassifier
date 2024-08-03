@@ -272,9 +272,9 @@ def best_dataset(dataset1: Dataset,
                     len(logits_right)) if logits_right != [] else 0
       best_on_left.append(mean_left)
       best_on_right.append(mean_right)
-    wandb.log({"mean_logits": np.mean(best_on_right)})
-    logger.success(f"Mean of previous: {np.mean(best_on_left)}")
-    logger.success(f"Mean of actual: {np.mean(best_on_right)}")
+    wandb.log({"mean_logits": np.median(best_on_right)})
+    logger.success(f"Mean of previous: {np.median(best_on_left)}")
+    logger.success(f"Mean of actual: {np.median(best_on_right)}")
     if np.median(best_on_left) > np.median(best_on_right):
       logger.success("Previous dataset is better")
       return dataset1
