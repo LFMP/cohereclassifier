@@ -222,7 +222,7 @@ def best_dataset(dataset1: Dataset,
   # return True if logits of texts in dataset2['best_texts'] are greater
   # than the logits of texts in dataset1['best_texts']
   meteor_left, meteor_right = compute_meteor(dataset1, dataset2)
-  wandb.log({"previous_meteor_score": meteor_right})
+  wandb.log({"previous_meteor_score": meteor_left})
   wandb.log({"new_meteor_score": meteor_right})
   logger.success(f"Mean meteor of left: {meteor_left}")
   logger.success(f"Mean meteor of right: {meteor_right}")
