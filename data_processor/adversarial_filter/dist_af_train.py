@@ -185,9 +185,88 @@ def compute_meteor(dataset1, dataset2):
           references=reference,
       )
       best_on_right.append(meteor_right['meteor'])
-  mean_left = np.mean(best_on_left) if best_on_left != [] else 0
-  mean_right = np.mean(best_on_right) if best_on_right != [] else 0
-  return (mean_left, mean_right)
+  median_left = np.median(best_on_left) if best_on_left != [] else 0
+  median_right = np.median(best_on_right) if best_on_right != [] else 0
+  return (median_left, median_right)
+
+
+def best_dataset(dataset1: Dataset,
+                 dataset2: Dataset,
+                 criteria: str = "mean") -> Dataset:
+
+  # return True if logits of texts in dataset2['best_texts'] are greater
+  # than the logits of texts in dataset1['best_texts']
+  meteor_left, meteor_right = compute_meteor(dataset1, dataset2)
+  wandb.log({"previous_meteor_score": meteor_left})
+  wandb.log({"new_meteor_score": meteor_right})
+  logger.success(f"Median of meteor on previous dataset: {meteor_left}")
+  logger.success(f"Median of meteor om new dataset: {meteor_right}")
+  if criteria.lower() == "sum":
+    best_on_left: int = 0
+    best_on_right: int = 0
+    logger.info("Comparing datasets using sum criteria")
+    for row in tqdm(range(len(dataset1)), desc="Iterating over rows"):
+      best_texts_left = dataset1[row]['best_texts']
+      best_texts_right = dataset2[row]['best_texts']
+      for idx in range(len(best_texts_left)):
+        if best_texts_left[idx] != -1 and best_texts_right[idx] != -1:
+          if dataset1[row][f'best_logit_{best_texts_left[idx]}'] > dataset2[
+              row][f'best_logit_{best_texts_right[idx]}']:
+            best_on_left += 1
+          else:
+            best_on_right += 1
+    wandb.log({"sum_logits": best_on_right})
+    logger.success(f"Sum of previous: {best_on_left}")
+    logger.success(f"Sum of actual: {best_on_right}")
+    if best_on_left > best_on_right:
+      logger.success("Previous dataset is better")
+      return dataset1
+    else:
+      logger.success("New dataset is better")
+      return dataset2
+  elif criteria.lower() == "mean":
+    best_on_left: List[float] = []
+    best_on_right: List[float] = []
+    logger.info("Comparing datasets using mean criteria")
+    for row in tqdm(range(len(dataset1)), desc="Iterating over rows"):
+      best_texts_left: List[int] = dataset1[row]['best_texts']
+      best_texts_right: List[int] = dataset2[row]['best_texts']
+      if (-1 not in best_texts_left) and (-1 not in best_texts_right):
+        logits_left: List[float] = [
+            dataset1[row][f'best_logit_{id}'] for id in best_texts_left
+        ]
+        logits_right: List[float] = [
+            dataset2[row][f'best_logit_{id}'] for id in best_texts_right
+        ]
+      else:
+        logits_left = []
+        logits_right = []
+      mean_left = np.mean(logits_left) if logits_left != [] else 0.
+      mean_right = np.mean(logits_right) if logits_right != [] else 0
+      best_on_left.append(mean_left)
+      best_on_right.append(mean_right)
+
+    median_left = np.median(best_on_left)
+    median_right = np.median(best_on_right)
+    wandb.log({"previous_median_logits": median_left})
+    wandb.log({"new_median_logits": median_right})
+    logger.success(f"Mean of previous: {median_left}")
+    logger.success(f"Mean of actual: {median_right}")
+    if median_left != 0 and  median_left > median_right:
+      logger.success("Previous dataset is better")
+      return dataset1
+    else:
+      logger.success("New dataset is better")
+      return dataset2
+  elif criteria.lower() == "meteor":
+    logger.info("Comparing datasets using meteor criteria")
+    if meteor_left != 0 and meteor_left > meteor_right:
+      logger.success("Previous dataset is better")
+      return dataset1
+    else:
+      logger.success("New dataset is better")
+  else:
+    raise ValueError("criteria must be 'sum','mean' or 'meteor'")
 
 
 def compute_metrics(eval_pred: EvalPrediction) -> Dict[str, Any]:
@@ -213,83 +292,6 @@ def compute_metrics(eval_pred: EvalPrediction) -> Dict[str, Any]:
   for idx, acc in enumerate(acc_by_class):
     metrics[f"accuracy_class_{idx}"] = acc
   return metrics
-
-
-def best_dataset(dataset1: Dataset,
-                 dataset2: Dataset,
-                 criteria: str = "mean") -> Dataset:
-
-  # return True if logits of texts in dataset2['best_texts'] are greater
-  # than the logits of texts in dataset1['best_texts']
-  meteor_left, meteor_right = compute_meteor(dataset1, dataset2)
-  wandb.log({"previous_meteor_score": meteor_left})
-  wandb.log({"new_meteor_score": meteor_right})
-  logger.success(f"Mean meteor of left: {meteor_left}")
-  logger.success(f"Mean meteor of right: {meteor_right}")
-  if criteria.lower() == "sum":
-    best_on_left: int = 0
-    best_on_right: int = 0
-    logger.info("Comparing datasets using sum criteria")
-    for row in tqdm(range(len(dataset1)), desc="Iterating over rows"):
-      best_texts_left = dataset1[row]['best_texts']
-      best_texts_right = dataset2[row]['best_texts']
-      for idx in range(len(best_texts_left)):
-        if best_texts_left[idx] != -1 and best_texts_right[idx] != -1:
-          if dataset1[row][f'best_logit_{best_texts_left[idx]}'] > dataset2[
-              row][f'best_logit_{best_texts_right[idx]}']:
-            best_on_left += 1
-          else:
-            best_on_right += 1
-    wandb.log({"sum_logits": best_on_right})
-    logger.success(f"Sum of previous: {np.mean(best_on_left)}")
-    logger.success(f"Sum of actual: {np.mean(best_on_right)}")
-    if best_on_left > best_on_right:
-      logger.success("Previous dataset is better")
-      return dataset1
-    else:
-      logger.success("New dataset is better")
-      return dataset2
-  elif criteria.lower() == "mean":
-    best_on_left: List[float] = []
-    best_on_right: List[float] = []
-    logger.info("Comparing datasets using mean criteria")
-    for row in tqdm(range(len(dataset1)), desc="Iterating over rows"):
-      best_texts_left: List[int] = dataset1[row]['best_texts']
-      best_texts_right: List[int] = dataset2[row]['best_texts']
-      if (-1 not in best_texts_left) and (-1 not in best_texts_right):
-        logits_left: List[float] = [
-            dataset1[row][f'best_logit_{id}'] for id in best_texts_left
-        ]
-        logits_right: List[float] = [
-            dataset2[row][f'best_logit_{id}'] for id in best_texts_right
-        ]
-      else:
-        logits_left = []
-        logits_right = []
-      mean_left = (sum(logits_left) /
-                   len(logits_left)) if logits_left != [] else 0
-      mean_right = (sum(logits_right) /
-                    len(logits_right)) if logits_right != [] else 0
-      best_on_left.append(mean_left)
-      best_on_right.append(mean_right)
-    wandb.log({"mean_logits": np.median(best_on_right)})
-    logger.success(f"Mean of previous: {np.median(best_on_left)}")
-    logger.success(f"Mean of actual: {np.median(best_on_right)}")
-    if np.median(best_on_left) > np.median(best_on_right):
-      logger.success("Previous dataset is better")
-      return dataset1
-    else:
-      logger.success("New dataset is better")
-      return dataset2
-  elif criteria.lower() == "meteor":
-    logger.info("Comparing datasets using meteor criteria")
-    if meteor_left != 0 and meteor_left > meteor_right:
-      logger.success("Previous dataset is better")
-      return dataset1
-    else:
-      logger.success("New dataset is better")
-  else:
-    raise ValueError("criteria must be 'sum','mean' or 'meteor'")
 
 
 args = argument_parser()
@@ -409,6 +411,7 @@ for idx_iter in range(args.iterations):
 
   run = wandb.init(project=f"adversarial_filtering",
                    tags=tags,
+                   reinit=True,
                    name=f"af_{idx_iter}_of_{args.iterations}")
 
   # Define training arguments
