@@ -1,7 +1,7 @@
 import argparse
 import os
 import time
-from typing import Optional
+from typing import Any, Dict, List
 
 import datasets
 import numpy as np
@@ -9,16 +9,15 @@ import torch
 from datasets import ClassLabel
 from loguru import logger
 from peft import LoKrConfig, LoraConfig, PeftModel, TaskType, get_peft_model
-from sklearn.metrics import (accuracy_score, balanced_accuracy_score,
-                             confusion_matrix, f1_score)
+from sklearn.metrics import balanced_accuracy_score, confusion_matrix, f1_score
 from torch.nn import CrossEntropyLoss
 from transformers import (AutoModelForSequenceClassification, AutoTokenizer,
                           DataCollatorWithPadding, SchedulerType, Trainer,
-                          TrainerCallback, TrainingArguments)
-from transformers.trainer_callback import TrainerControl, TrainerState
+                          TrainingArguments)
 from transformers.trainer_utils import PredictionOutput
 
 import wandb
+from data_processor.commonstories import CommonStories
 from data_processor.ftbr import FakeTrueBr
 from data_processor.gcdc import GCDC
 from data_processor.pos_tags import POS_TAGS_COMPILED
@@ -33,7 +32,7 @@ parser.add_argument(
 parser.add_argument(
     '--batch_size',
     type=int,
-    default=5,
+    default=10,
 )
 parser.add_argument('--epochs', type=int, default=10)
 parser.add_argument('--tokenizer',
@@ -44,16 +43,17 @@ parser.add_argument('--pos', action='store_true')
 parser.add_argument('--lokr', action='store_true')
 parser.add_argument('--lora', action='store_true')
 parser.add_argument('--lr', type=float, default=5e-5)
-parser.add_argument('--num_cycles', type=int, default=2)
 parser.add_argument('--processed', action='store_true')
-parser.add_argument('--runs', type=int, default=1)
+parser.add_argument('--runs', type=int, default=10)
+parser.add_argument('--debug', action='store_true')
 args = parser.parse_args()
 
 
 def load_dataset(dataset_path=args.dataset_path):
   # get the name of the dataset which is the last part of the normalized path
-  normalized_path = os.path.normpath(dataset_path)
-  dataset_name = os.path.basename(normalized_path).lower()
+  dataset_name = os.path.basename(os.path.normpath(dataset_path)).lower()
+  if "_af_output" in dataset_name:
+    dataset_name = dataset_name.replace("_af_output", "")
   if args.processed:
     dataset = datasets.load_from_disk(dataset_path)
   else:
@@ -69,20 +69,28 @@ def load_dataset(dataset_path=args.dataset_path):
       logger.info(
           "Saving processed dataset to disk for future use in data/faketrue")
       dataset.save_to_disk("data/faketrue")
+    else:
+      dataset = datasets.load_from_disk(dataset_path)
+      logger.info("Processing dataset")
+      dataset = CommonStories(dataset).process_dataset()
+      logger.info(
+          f"Saving processed dataset to disk for future use in data/{dataset_name}"
+      )
+      dataset.save_to_disk(f"data/{dataset_name}")
   return dataset
 
 
-def tokenize_function(examples, field="text"):
+def tokenize_function(examples: Dict[str, List[Any]], field="text"):
   return tokenizer(examples[field])
 
 
-def collate_fn(examples):
+def collate_fn(examples: Dict[str, List[Any]]) -> Dict[str, torch.Tensor]:
   texts = torch.tensor([example["text"] for example in examples])
   labels = torch.tensor([example["label"] for example in examples])
   return {"texts": texts, "labels": labels}
 
 
-def compute_metrics(eval_pred):
+def compute_metrics(eval_pred) -> Dict[str, float]:
   logits, labels = eval_pred
   predictions = np.argmax(logits, axis=-1)
   metrics = {}
@@ -91,11 +99,15 @@ def compute_metrics(eval_pred):
                            predictions,
                            average="weighted",
                            zero_division=0.0)
-  metrics["accuracy"] = accuracy_score(labels, predictions)
+  cm = confusion_matrix(labels, predictions)
+  cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+  acc = cm.diagonal()
+  for idx in range(len(acc)):
+    metrics[f"accuracy_{idx}"] = acc[idx]
   return metrics
 
 
-def add_tokens():
+def add_tokens() -> None:
   embedding_size = len(tokenizer)
   num_new_tokens = 0
   if args.rst:
@@ -130,81 +142,6 @@ def add_tokens():
   logger.success("Embeddings overwritten")
 
 
-class LoggingCalback(TrainerCallback):
-  # create a callback callend in end of each epoch to log confusion matrix to
-  # wandb
-  def __init__(self, trainer):
-    self._trainer = trainer
-
-  def on_epoch_end(self, args: TrainingArguments, state: TrainerState,
-                   control: TrainerControl, **kwargs):
-    # predict on training dataset and log metrics to wandb
-    pred = self._trainer.predict(
-        test_dataset=self._trainer.train_dataset,
-        metric_key_prefix="train",
-    )
-    # metrics = pred.metrics
-    # replace the "_" in keys with "/" to avoid wandb error
-    # metrics = {key.replace("_", "/", 1): metrics[key] for key in metrics}
-    # wandb.log(metrics)
-    # log accuracy by class to wandb
-    y_pred = np.argmax(pred.predictions, axis=-1)
-    y_true = pred.label_ids
-    cm = confusion_matrix(y_true, y_pred)
-    cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
-    acc = cm.diagonal()
-    data = [[idx, acc[idx]] for idx in range(len(acc))]
-    table = wandb.Table(data=data, columns=["label", "value"])
-    wandb.log({
-        "train/accuracy_by_class":
-            wandb.plot.bar(
-                table,
-                "label",
-                "value",
-                title="Accuracy by class",
-            ),
-    })
-    wandb.log({
-        "train/confusion_matrix":
-            wandb.plot.confusion_matrix(
-                preds=y_pred,
-                y_true=y_true,
-            ),
-    })
-
-  def on_evaluate(self, args: TrainingArguments, state: TrainerState,
-                  control: TrainerControl, **kwargs) -> None:
-    # call evaluation and get y_true and y_pred for evaluation dataset
-    pred = self._trainer.predict(
-        test_dataset=self._trainer.eval_dataset,
-        metric_key_prefix="eval",
-    )
-    y_pred = np.argmax(pred.predictions, axis=-1)
-    y_true = pred.label_ids
-    # log accuracy by class to wandb
-    cm = confusion_matrix(y_true, y_pred)
-    cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
-    acc = cm.diagonal()
-    data = [[idx, acc[idx]] for idx in range(len(acc))]
-    table = wandb.Table(data=data, columns=["label", "value"])
-    wandb.log({
-        "eval/accuracy_by_class":
-            wandb.plot.bar(
-                table,
-                "label",
-                "value",
-                title="Accuracy by class",
-            ),
-    })
-    wandb.log({
-        "eval/confusion_matrix":
-            wandb.plot.confusion_matrix(
-                preds=y_pred,
-                y_true=y_true,
-            ),
-    })
-
-
 class WeightedTrainer(Trainer):
   # replace the loss function to weighted CrossEntropyLoss for classification with
   # imbalanced classes
@@ -229,17 +166,18 @@ dataset_name = os.path.basename(normalized_path).lower()
 
 logger.info(f"Loading dataset {dataset_name}")
 dataset = load_dataset()
-for d in dataset:
-  # actual gcdc labels are {0,1,2}, transformed to [0, 2]
-  dataset[d] = dataset[d].filter(lambda e: e["label"] != 1)
-  # tranform labels to [0, 1]
-  dataset[d] = dataset[d].map(
-      lambda e: {"label": 0 if e["label"] == 0 else 1},
-      remove_columns=["label"],
-      num_proc=4,
-      desc="Transforming labels to [0, 1]",
-  )
-  dataset[d] = dataset[d].cast_column("label", ClassLabel(names=["0", "1"]))
+if "gcdc" in dataset_name:
+  for d in dataset:
+    # actual gcdc labels are {0,1,2}, transformed to [0, 2]
+    dataset[d] = dataset[d].filter(lambda e: e["label"] != 1)
+    # tranform labels to [0, 1]
+    dataset[d] = dataset[d].map(
+        lambda e: {"label": 0 if e["label"] == 0 else 1},
+        remove_columns=["label"],
+        num_proc=4,
+        desc="Transforming labels to [0, 1]",
+    )
+    dataset[d] = dataset[d].cast_column("label", ClassLabel(names=["0", "1"]))
 num_labels = dataset["train"].features["label"].num_classes
 logger.info(f"Number of labels: {num_labels}")
 logger.success("Dataset loaded")
@@ -258,9 +196,10 @@ logger.success("Model loaded")
 # calculate class weights for imbalanced datasets
 class_weights = None
 if "train" in dataset:
-  labels = dataset["train"]["label"]
+  labels = dataset["train"]["label"].tolist()
   class_weights = torch.tensor([1 / count for count in np.bincount(labels)],
                                device="cuda")
+  # commonstories: [0.4003, 0.5997]
   class_weights = class_weights / class_weights.sum()
   # convert tensor to float
   class_weights = class_weights.float()
@@ -293,11 +232,12 @@ elif args.pos:
 else:
   tokenized_field = text_field
   tags.append("vanilla")
-tokenized_datasets = dataset.map(tokenize_function,
-                                 batch_size=args.batch_size,
-                                 batched=True,
-                                 fn_kwargs={"field": tokenized_field})
-tokenized_datasets = tokenized_datasets.remove_columns([text_field])
+tokenized_datasets = dataset.map(
+    tokenize_function,
+    batch_size=args.batch_size,
+    batched=True,
+    fn_kwargs={"field": tokenized_field},
+)
 tokenized_datasets = tokenized_datasets.rename_column("label", "labels")
 tokenized_datasets.set_format("torch")
 logger.success("Dataset tokenized")
@@ -343,7 +283,7 @@ for run_idx in range(args.runs):
                 f"lokr-{args.lokr}_"
                 f"lora-{args.lora}_"
                 f"batch_size-{args.batch_size}_"
-                f"num_cycles-{args.num_cycles}_"
+                f"num_cycles-{args.epochs-1}_"
                 f"rst-{args.rst}_"
                 f"pos-{args.pos}")
 
@@ -356,10 +296,17 @@ for run_idx in range(args.runs):
   data_collator = DataCollatorWithPadding(tokenizer)
 
   # initialize wandb with project name, tags and group
-  wandb.init(project=f"binary-coherence-classification-{dataset_name}",
-             reinit=True,
-             group=group_name,
-             tags=tags)
+  if args.debug:
+    dataset_name += "_debug"
+    tags.append("debug")
+    args.runs = 1
+    args.epochs = 2
+  run = wandb.init(
+      project=f"binary-coherence-classification-{dataset_name}",
+      reinit=True,
+      group=group_name,
+      tags=tags,
+  )
 
   # Define training arguments
   training_args = TrainingArguments(
@@ -368,23 +315,24 @@ for run_idx in range(args.runs):
       eval_strategy="epoch",
       save_strategy="epoch",
       logging_steps=1,
-      do_eval=True,
       load_best_model_at_end=True,
       overwrite_output_dir=True,
       learning_rate=args.lr,
-      per_device_train_batch_size=args.batch_size,
-      per_device_eval_batch_size=args.batch_size,
+      auto_find_batch_size=True,
       bf16=True,
       bf16_full_eval=True,
       num_train_epochs=args.epochs,
-      warmup_steps=50,
+      warmup_ratio=0.1,
       lr_scheduler_type=SchedulerType.COSINE_WITH_RESTARTS,
-      lr_scheduler_kwargs={"num_cycles": args.num_cycles},
+      lr_scheduler_kwargs={"num_cycles": args.epochs - 1},
       gradient_checkpointing=True,
       gradient_checkpointing_kwargs={"use_reentrant": False},
       label_names=["labels"],
       report_to="wandb",
       metric_for_best_model="eval_balanced_accuracy",
+      greater_is_better=True,
+      eval_on_start=True,
+      seed=np.random.randint(0, 1000),
       run_name=run_name,
   )
 
@@ -398,8 +346,6 @@ for run_idx in range(args.runs):
       compute_metrics=compute_metrics,
       class_weights=class_weights,
   )
-
-  trainer.add_callback(LoggingCalback(trainer))
 
   logger.info("Training model")
   trainer.train()
@@ -425,24 +371,21 @@ for run_idx in range(args.runs):
         metric_key_prefix=f"eval/{source}",
     )
     metrics = pred.metrics
-    # create table for metrics to log to wandb
-    data = [[key, metrics[key]] for key in metrics]
-    columns = ["metric", "value"]
-    table = wandb.Table(data=data, columns=columns)
-    wandb.log({f"eval/{source}/metrics": table})
-    logger.success(f"Metrics for {source}: {metrics}")
+    wandb.log(metrics)
 
   logger.info("Saving model")
-  trainer.model.save_pretrained(out_dir)
-  logger.info("Model saved")
-
-  if args.lora or args.lokr:
+  if not args.lokr and not args.lora:
+    trainer.model.save_pretrained(out_dir)
+  else:
+    trainer.model.save_pretrained(out_dir, save_embedding_layers=True)
     logger.info("Loading base model and merging with PEFT model")
-    base_model = AutoModelForSequenceClassification.from_pretrained(
-        "severinsimmler/xlm-roberta-longformer-base-16384",
-        num_labels=num_labels,
-    )
-    merged_model = PeftModel.from_pretrained(base_model, out_dir)
-    merged_model = merged_model.merge_and_unload()
-    merged_model.save_pretrained(out_dir + "_merged")
-    logger.success("Model merged and saved")
+    base_model = trainer.model.base_model
+    model = PeftModel.from_pretrained(
+        base_model,
+        out_dir,
+        torch_dtype=torch.float16,
+        is_trainable=False,
+    ).to('cuda')
+    model.merge_and_unload()
+    model.save_pretrained(out_dir, save_embedding_layers=True)
+  logger.info("Model saved")
