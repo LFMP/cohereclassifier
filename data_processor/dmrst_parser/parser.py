@@ -1,3 +1,5 @@
+from typing import Any, Dict, List
+
 import torch
 from transformers import AutoModel, AutoTokenizer
 
@@ -30,7 +32,9 @@ class DMRSTParser:
     self.model.load_state_dict(self.state_dict)
     self.model = self.model.eval()
 
-  def inference(self, examples: dict, field: str = "story") -> None:
+  def inference(self,
+                examples: Dict[str, List[Any]],
+                field: str = "story") -> Dict[str, List[Any]]:
     texts = examples[field]
 
     input_sentences = [
