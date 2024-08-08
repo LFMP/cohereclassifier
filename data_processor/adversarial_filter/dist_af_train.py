@@ -12,8 +12,7 @@ from datasets import Dataset, DatasetDict
 from loguru import logger
 from peft import LoKrConfig, PeftModel, get_peft_model
 from processor import batched_encode_function, batched_preprocess_function
-from sklearn.metrics import (accuracy_score, balanced_accuracy_score,
-                             confusion_matrix, f1_score)
+from sklearn.metrics import balanced_accuracy_score, confusion_matrix, f1_score
 from tqdm import tqdm
 from trainer import WeightedTrainer
 from transformers import (AutoModelForMultipleChoice, AutoTokenizer,
@@ -133,7 +132,6 @@ def update_dataset(dataset: DatasetDict) -> Dataset:
       batch_inference_function,
       batched=True,
       batch_size=args.batch_size,
-      load_from_cache_file=False,
       num_proc=1,
       desc="Updating validation",
   )
@@ -144,7 +142,6 @@ def update_dataset(dataset: DatasetDict) -> Dataset:
       batched=True,
       batch_size=args.batch_size,
       num_proc=1,
-      load_from_cache_file=False,
       desc="Updating test",
   )
   dataset['test'] = ds_test
@@ -231,28 +228,33 @@ def best_dataset(dataset1: Dataset,
     for row in tqdm(range(len(dataset1)), desc="Iterating over rows"):
       best_texts_left: List[int] = dataset1[row]['best_texts']
       best_texts_right: List[int] = dataset2[row]['best_texts']
-      if (-1 not in best_texts_left) and (-1 not in best_texts_right):
+      if (-1 not in best_texts_left):
         logits_left: List[float] = [
             dataset1[row][f'best_logit_{id}'] for id in best_texts_left
         ]
+        best_on_left.append(np.mean(logits_left))
+      else:
+        logits_left = []
+      if (-1 not in best_texts_right):
         logits_right: List[float] = [
             dataset2[row][f'best_logit_{id}'] for id in best_texts_right
         ]
+        best_on_right.append(np.mean(logits_right))
       else:
-        logits_left = []
         logits_right = []
-      mean_left = np.mean(logits_left) if logits_left != [] else 0.
-      mean_right = np.mean(logits_right) if logits_right != [] else 0
-      best_on_left.append(mean_left)
-      best_on_right.append(mean_right)
-
-    median_left = np.median(best_on_left)
-    median_right = np.median(best_on_right)
+    if best_on_left == []:
+      median_left = 0
+    else:
+      median_left = np.median(best_on_left)
+    if best_on_right == []:
+      median_right = 0
+    else:
+      median_right = np.median(best_on_right)
     wandb.log({"previous_median_logits": median_left})
     wandb.log({"new_median_logits": median_right})
-    logger.success(f"Mean of previous: {median_left}")
-    logger.success(f"Mean of actual: {median_right}")
-    if median_left != 0 and  median_left > median_right:
+    logger.success(f"Median of previous: {median_left}")
+    logger.success(f"Median of actual: {median_right}")
+    if median_left != 0 and median_left > median_right:
       logger.success("Previous dataset is better")
       return dataset1
     else:
@@ -288,7 +290,6 @@ def compute_metrics(eval_pred: EvalPrediction) -> Dict[str, Any]:
                            preds,
                            average="weighted",
                            zero_division=0.0)
-  metrics["accuracy"] = accuracy_score(flattened_labels, preds)
   for idx, acc in enumerate(acc_by_class):
     metrics[f"accuracy_class_{idx}"] = acc
   return metrics
@@ -313,7 +314,6 @@ original_dataset = original_dataset.map(
     batched_preprocess_function,
     batched=True,
     num_proc=10,
-    load_from_cache_file=False,
     desc="Adding useful columns to dataset",
 )
 logger.success("Columns added")
@@ -330,7 +330,6 @@ else:
       batch_size=args.batch_size,
       num_proc=4,
       fn_kwargs={'tokenizer': tokenizer},
-      load_from_cache_file=False,
       desc="Tokenizing dataset",
   )
   tokenized_dataset.set_format("torch")
@@ -351,8 +350,6 @@ if args.debug:
 
 if args.lokr:
   tags.append("lokr")
-
-run = wandb.init(project=f"adversarial_filtering", tags=tags)
 
 for idx_iter in range(args.iterations):
   logger.info("Loading base model")
@@ -408,16 +405,18 @@ for idx_iter in range(args.iterations):
       'val': test_valid['train']
   })
   logger.success("Dataset splitted")
-
-  run = wandb.init(project=f"adversarial_filtering",
-                   tags=tags,
-                   reinit=True,
-                   name=f"af_{idx_iter}_of_{args.iterations}")
+  model_name = f"af_models/model_{idx_iter}_{args.iterations}_{args.num_texts}_{args.num_combinations}"
+  run = wandb.init(
+      project=f"adversarial_filtering",
+      tags=tags,
+      reinit=True,
+      group=f"af_{args.iterations}_{args.num_texts}_{args.num_combinations}",
+      name=model_name.split("/")[-1],
+  )
 
   # Define training arguments
   training_args = TrainingArguments(
-      output_dir=
-      f"af_outputs/{idx_iter}_of_{args.iterations}_with_{args.num_texts}_texts_and_{args.num_combinations}_comb",
+      output_dir=model_name,
       eval_strategy="epoch",
       save_strategy="epoch",
       overwrite_output_dir=True,
@@ -435,7 +434,7 @@ for idx_iter in range(args.iterations):
       remove_unused_columns=False,
       report_to="wandb",
       seed=np.random.randint(0, 1000),
-      run_name=f"af_{idx_iter}_of_{args.iterations}",
+      run_name=model_name.split("/")[-1],
   )
 
   trainer = WeightedTrainer(
@@ -460,17 +459,14 @@ for idx_iter in range(args.iterations):
   metrics = trainer.evaluate(dataset["val"])
   wandb.log(metrics)
   logger.success(f"Model {idx_iter} evaluated")
-  model_name = f"af_models/model_{idx_iter}_{args.iterations}_{args.num_texts}_{args.num_combinations}"
-  if args.lokr:
-    model.save_pretrained(model_name, save_embedding_layers=True)
-  else:
+  if not args.lokr:
     trainer.save_model(model_name)
   logger.success(f"Model {idx_iter} trained and saved")
   if args.lokr:
     logger.info("Loading base model and merging with PEFT model")
-    model = trainer.model.base_model
+    base_model = trainer.model.base_model
     model = PeftModel.from_pretrained(
-        model,
+        base_model,
         model_name,
         torch_dtype=torch.float16,
         is_trainable=False,
