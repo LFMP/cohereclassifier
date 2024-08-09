@@ -30,7 +30,7 @@ class POSMix():
     for doc in self.nlp.pipe(texts):
       combined_tokes = []
       for token in doc:
-        if token.pos_ != "SPACE":
+        if token.pos_ != "SPACE" and token.pos_ != "PUNCT":
           combined_tokes.append(f"{token.text}_{token.pos_}")
       combined_text = " ".join(combined_tokes)
       new_texts.append(combined_text)

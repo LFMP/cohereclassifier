@@ -113,18 +113,14 @@ def add_tokens() -> None:
   if args.rst:
     logger.info("Adding RST tags to tokenizer")
     num_new_tokens = tokenizer.add_special_tokens(
-        {"additional_special_tokens": RST_TAGS_COMPILED},
-        replace_additional_special_tokens=False,
-    )
+        {"additional_special_tokens": RST_TAGS_COMPILED})
     logger.success(
         f"{num_new_tokens} RST tags added to tokenizer (from {embedding_size}) to {len(tokenizer)})"
     )
   elif args.pos:
     logger.info("Adding POS tags to tokenizer")
     num_new_tokens = tokenizer.add_special_tokens(
-        {"additional_special_tokens": POS_TAGS_COMPILED},
-        replace_additional_special_tokens=False,
-    )
+        {"additional_special_tokens": POS_TAGS_COMPILED})
     logger.success(
         f"{num_new_tokens} POS tags added to tokenizer (from {embedding_size}) to {len(tokenizer)})"
     )
