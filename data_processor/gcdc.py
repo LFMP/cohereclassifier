@@ -1,4 +1,5 @@
 import os
+from typing import Any, Dict, List
 
 import datasets
 import pandas as pd
@@ -11,23 +12,19 @@ from .rst_mix import RSTMix
 
 class GCDC:
 
-  def __init__(self,
-               dataset_path: str,
-               batch_size: int = 400,
-               binary: bool = False) -> None:
+  def __init__(self, dataset_path: str, batch_size: int = 400) -> None:
     self.dataset_path = dataset_path
     self.batch_size = batch_size
-    self.binary = binary
     self.parser = DMRSTParser(
         model_path=
         "data_processor/dmrst_parser/checkpoint/multi_all_checkpoint.torchsave")
     self.rst_mixer = RSTMix()
     self.pos_mixer = POSMix()
 
-  def parse_rst(self, examples: dict):
+  def parse_rst(self, examples: Dict[str, Any]) -> Dict[str, List[Any]]:
     return self.parser.inference(examples, field="text")
 
-  def rst_mix(self, examples):
+  def rst_mix(self, examples: Dict[str, Any]) -> Dict[str, List[Any]]:
     new_texts = []
     texts = examples["text_rst"]
     edus = examples["text_edus"]
@@ -36,7 +33,7 @@ class GCDC:
     examples["text_rst_mixed"] = new_texts
     return examples
 
-  def pos_mix(self, examples):
+  def pos_mix(self, examples: Dict[str, Any]) -> Dict[str, List[Any]]:
     texts = examples["text"]
     examples['text_pos_mixed'] = self.pos_mixer.process(texts)
     return examples
@@ -73,24 +70,15 @@ class GCDC:
           num_proc=4,
           desc="Transforming labels to [0, 1, 2]",
       )
-      # remove rows with label 1
-      if self.binary:
-        # actual gcdc labels are {0,1,2}, transformed to [0, 2]
-        dataset[d] = dataset[d].filter(lambda e: e["label"] != 1)
-        # tranform labels to [0, 1]
-        dataset[d] = dataset[d].map(
-            lambda e: {"label": 0 if e["label"] == 0 else 1},
-            num_proc=4,
-            desc="Transforming labels to [0, 1]",
-        )
       # cast the column with 'label' to ClassLabel with class_encode_column
-      dataset[d] = dataset[d].cast_column("label", ClassLabel(names=["0", "1"]))
+      dataset[d] = dataset[d].cast_column("label",
+                                          ClassLabel(names=["0", "1", "2"]))
       dataset[d] = dataset[d].cast_column("label1",
-                                          ClassLabel(names=["0", "1"]))
+                                          ClassLabel(names=["0", "1", "2"]))
       dataset[d] = dataset[d].cast_column("label2",
-                                          ClassLabel(names=["0", "1"]))
+                                          ClassLabel(names=["0", "1", "2"]))
       dataset[d] = dataset[d].cast_column("label3",
-                                          ClassLabel(names=["0", "1"]))
+                                          ClassLabel(names=["0", "1", "2"]))
 
     # concatenate all datasets by split
     ds = {}
