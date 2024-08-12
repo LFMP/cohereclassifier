@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from datasets import ClassLabel
 from loguru import logger
-from peft import LoKrConfig, LoraConfig, PeftModel, TaskType, get_peft_model
+from peft import LoKrConfig, PeftModel, TaskType, get_peft_model
 from sklearn.metrics import balanced_accuracy_score, confusion_matrix, f1_score
 from torch.nn import CrossEntropyLoss
 from transformers import (AutoModelForSequenceClassification, AutoTokenizer,
@@ -32,7 +32,7 @@ parser.add_argument(
 parser.add_argument(
     '--batch_size',
     type=int,
-    default=10,
+    default=1,
 )
 parser.add_argument('--epochs', type=int, default=10)
 parser.add_argument('--tokenizer',
@@ -41,7 +41,6 @@ parser.add_argument('--tokenizer',
 parser.add_argument('--rst', action='store_true')
 parser.add_argument('--pos', action='store_true')
 parser.add_argument('--lokr', action='store_true')
-parser.add_argument('--lora', action='store_true')
 parser.add_argument('--lr', type=float, default=5e-5)
 parser.add_argument('--processed', action='store_true')
 parser.add_argument('--runs', type=int, default=10)
@@ -107,37 +106,6 @@ def compute_metrics(eval_pred) -> Dict[str, float]:
   return metrics
 
 
-def add_tokens() -> None:
-  embedding_size = len(tokenizer)
-  num_new_tokens = 0
-  if args.rst:
-    logger.info("Adding RST tags to tokenizer")
-    num_new_tokens = tokenizer.add_special_tokens(
-        {"additional_special_tokens": RST_TAGS_COMPILED})
-    logger.success(
-        f"{num_new_tokens} RST tags added to tokenizer (from {embedding_size}) to {len(tokenizer)})"
-    )
-  elif args.pos:
-    logger.info("Adding POS tags to tokenizer")
-    num_new_tokens = tokenizer.add_special_tokens(
-        {"additional_special_tokens": POS_TAGS_COMPILED})
-    logger.success(
-        f"{num_new_tokens} POS tags added to tokenizer (from {embedding_size}) to {len(tokenizer)})"
-    )
-
-  logger.info("Resizing token embeddings of model")
-  model.resize_token_embeddings(len(tokenizer))
-  logger.success(
-      f"Model token embeddings resized from {embedding_size} to {len(tokenizer)}"
-  )
-  logger.info("Overwriting the embeddings to have better results")
-  input_embeddings = model.get_input_embeddings().weight.data
-  input_embeddings_avg = input_embeddings[:-num_new_tokens].mean(dim=0,
-                                                                 keepdim=True)
-  input_embeddings[-num_new_tokens:] = input_embeddings_avg
-  logger.success("Embeddings overwritten")
-
-
 class WeightedTrainer(Trainer):
   # replace the loss function to weighted CrossEntropyLoss for classification with
   # imbalanced classes
@@ -174,6 +142,7 @@ if "gcdc" in dataset_name:
         desc="Transforming labels to [0, 1]",
     )
     dataset[d] = dataset[d].cast_column("label", ClassLabel(names=["0", "1"]))
+    
 num_labels = dataset["train"].features["label"].num_classes
 logger.info(f"Number of labels: {num_labels}")
 logger.success("Dataset loaded")
@@ -182,32 +151,22 @@ logger.info("Loading tokenizer")
 tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
 logger.info("Tokenizer loaded")
 
-logger.info("Loading model")
-model = AutoModelForSequenceClassification.from_pretrained(
-    "severinsimmler/xlm-roberta-longformer-base-16384",
-    num_labels=num_labels,
-)
-logger.success("Model loaded")
-
-# calculate class weights for imbalanced datasets
-class_weights = None
-if "train" in dataset:
-  labels = dataset["train"]["label"].tolist()
-  class_weights = torch.tensor([1 / count for count in np.bincount(labels)],
-                               device="cuda")
-  # commonstories: [0.4003, 0.5997]
-  class_weights = class_weights / class_weights.sum()
-  # convert tensor to float
-  class_weights = class_weights.float()
-  logger.info(f"Class weights: {class_weights}")
-
-target_modules: list[str] = [
-    "query", "key", "value", "query_global", "key_global", "value_global"
-]
-
-if args.rst or args.pos:
-  add_tokens()
-  target_modules += ["embed_tokens", "lm_head"]
+embedding_size = len(tokenizer)
+num_new_tokens = 0
+if args.rst:
+  logger.info("Adding RST tags to tokenizer")
+  num_new_tokens = tokenizer.add_special_tokens(
+      {"additional_special_tokens": RST_TAGS_COMPILED})
+  logger.success(
+      f"{num_new_tokens} RST tags added to tokenizer (from {embedding_size}) to {len(tokenizer)})"
+  )
+elif args.pos:
+  logger.info("Adding POS tags to tokenizer")
+  num_new_tokens = tokenizer.add_special_tokens(
+      {"additional_special_tokens": POS_TAGS_COMPILED})
+  logger.success(
+      f"{num_new_tokens} POS tags added to tokenizer (from {embedding_size}) to {len(tokenizer)})"
+  )
 
 if "text" in dataset["train"].column_names:
   text_field = "text"
@@ -238,50 +197,26 @@ tokenized_datasets = tokenized_datasets.rename_column("label", "labels")
 tokenized_datasets.set_format("torch")
 logger.success("Dataset tokenized")
 
+wandb_group = ""
+warmup_ratio = 0.2
+num_cycles = 5
+if args.rst:
+  wandb_group += "RSTMix"
+elif args.pos:
+  wandb_group += "POSix"
+else:
+  wandb_group += "Vanilla"
 if args.lokr:
-  tags.append("lokr")
-  logger.info("Creating Lokr model")
-  config = LoKrConfig(
-      r=16,
-      alpha=16,
-      target_modules=target_modules,
-      inference_mode=False,
-      module_dropout=0.1,
-      task_type=TaskType.SEQ_CLS,
-      modules_to_save=["classifier"],
-  )
-  model = get_peft_model(model, config)
-  logger.success("Lokr model created")
-  model.print_trainable_parameters()
-elif args.lora:
-  tags.append("lora")
-  logger.info("Creating Lora model")
-  config = LoraConfig(
-      r=16,
-      lora_alpha=16,
-      target_modules=target_modules,
-      inference_mode=False,
-      lora_dropout=0.1,
-      bias="none",
-      task_type=TaskType.SEQ_CLS,
-      modules_to_save=["classifier"],
-  )
-  model = get_peft_model(model, config)
-  logger.success("Lora model created")
-  model.print_trainable_parameters()
+  wandb_group += "LoKr"
+wandb_group += f"_{num_cycles}_Cycles"
+wandb_group += f"_{warmup_ratio}_WarmR"
 
 for run_idx in range(args.runs):
   # define run name
   run_init_time = time.strftime("%Y-%m-%d_%H-%M-%S")
 
-  group_name = (f"{dataset_name}_"
-                f"epochs-{args.epochs}_"
-                f"lokr-{args.lokr}_"
-                f"lora-{args.lora}_"
-                f"batch_size-{args.batch_size}_"
-                f"num_cycles-{args.epochs-1}_"
-                f"rst-{args.rst}_"
-                f"pos-{args.pos}")
+  group_name = (f"{wandb_group}_"
+                f"{args.epochs}_Epochs")
 
   prefix_run = f"{group_name}_run-{run_idx}"
 
@@ -291,16 +226,74 @@ for run_idx in range(args.runs):
 
   data_collator = DataCollatorWithPadding(tokenizer)
 
-  # initialize wandb with project name, tags and group
+  logger.info("Loading model")
+  model = AutoModelForSequenceClassification.from_pretrained(
+      "severinsimmler/xlm-roberta-longformer-base-16384",
+      num_labels=num_labels,
+  )
+  logger.success("Model loaded")
+
+  # calculate class weights for imbalanced datasets
+  class_weights = None
+  if "train" in dataset:
+    if "gcdc" not in dataset_name:
+      labels = dataset["train"]["label"].tolist()
+    else:
+      labels = dataset["train"]["label"]
+    class_weights = torch.tensor([1 / count for count in np.bincount(labels)],
+                                device="cuda")
+    # commonstories: [0.4003, 0.5997]
+    class_weights = class_weights / class_weights.sum()
+    # convert tensor to float
+    class_weights = class_weights.float()
+    logger.info(f"Class weights: {class_weights}")
+
+  target_modules: list[str] = [
+      "query", "key", "value", "query_global", "key_global", "value_global"
+  ]
+
+  if args.rst or args.pos:
+    logger.info("Resizing token embeddings of model")
+    model.resize_token_embeddings(len(tokenizer))
+    logger.success(
+        f"Model token embeddings resized from {embedding_size} to {len(tokenizer)}"
+    )
+    logger.info("Overwriting the embeddings to have better results")
+    input_embeddings = model.get_input_embeddings().weight.data
+    input_embeddings_avg = input_embeddings[:-num_new_tokens].mean(dim=0,
+                                                                  keepdim=True)
+    input_embeddings[-num_new_tokens:] = input_embeddings_avg
+    logger.success("Embeddings overwritten")
+
+  if args.lokr:
+    tags.append("lokr")
+    target_modules += ["embed_tokens", "lm_head"]
+    logger.info("Creating Lokr model")
+    config = LoKrConfig(
+        r=16,
+        alpha=32,
+        target_modules=target_modules,
+        inference_mode=False,
+        module_dropout=0.1,
+        task_type=TaskType.SEQ_CLS,
+        use_effective_conv2d=True,
+        modules_to_save=["classifier"],
+    )
+    model = get_peft_model(model, config)
+    logger.success("Lokr model created")
+    model.print_trainable_parameters()
+
+    # initialize wandb with project name, tags and group
   if args.debug:
     dataset_name += "_debug"
     tags.append("debug")
     args.runs = 1
     args.epochs = 2
+
   run = wandb.init(
       project=f"binary-coherence-classification-{dataset_name}",
       reinit=True,
-      group=group_name,
+      group=wandb_group,
       tags=tags,
   )
 
@@ -314,13 +307,14 @@ for run_idx in range(args.runs):
       load_best_model_at_end=True,
       overwrite_output_dir=True,
       learning_rate=args.lr,
-      auto_find_batch_size=True,
+      per_device_train_batch_size=args.batch_size,
+      per_device_eval_batch_size=args.batch_size,
       bf16=True,
       bf16_full_eval=True,
       num_train_epochs=args.epochs,
-      warmup_ratio=0.1,
+      warmup_ratio=warmup_ratio,
       lr_scheduler_type=SchedulerType.COSINE_WITH_RESTARTS,
-      lr_scheduler_kwargs={"num_cycles": args.epochs - 1},
+      lr_scheduler_kwargs={"num_cycles": num_cycles},
       gradient_checkpointing=True,
       gradient_checkpointing_kwargs={"use_reentrant": False},
       label_names=["labels"],
@@ -370,7 +364,7 @@ for run_idx in range(args.runs):
     wandb.log(metrics)
 
   logger.info("Saving model")
-  if not args.lokr and not args.lora:
+  if not args.lokr:
     trainer.model.save_pretrained(out_dir)
   else:
     trainer.model.save_pretrained(out_dir, save_embedding_layers=True)
