@@ -329,6 +329,8 @@ af_models/
 af_outputs/
 checkpoints/
 data/
+processed/
+results/
 wandb/
 *.ipynb
 *.torchsave
