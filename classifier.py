@@ -1,6 +1,5 @@
 import argparse
 import os
-import time
 from typing import Any, Dict, List
 
 import datasets
@@ -43,7 +42,8 @@ parser.add_argument('--pos', action='store_true')
 parser.add_argument('--lokr', action='store_true')
 parser.add_argument('--lr', type=float, default=5e-5)
 parser.add_argument('--processed', action='store_true')
-parser.add_argument('--runs', type=int, default=10)
+parser.add_argument('--runs', type=int, default=5)
+parser.add_argument('--cycles', type=int, default=1)
 parser.add_argument('--debug', action='store_true')
 args = parser.parse_args()
 
@@ -142,7 +142,7 @@ if "gcdc" in dataset_name:
         desc="Transforming labels to [0, 1]",
     )
     dataset[d] = dataset[d].cast_column("label", ClassLabel(names=["0", "1"]))
-    
+
 num_labels = dataset["train"].features["label"].num_classes
 logger.info(f"Number of labels: {num_labels}")
 logger.success("Dataset loaded")
@@ -198,8 +198,8 @@ tokenized_datasets.set_format("torch")
 logger.success("Dataset tokenized")
 
 wandb_group = ""
-warmup_ratio = 0.2
-num_cycles = 5
+warmup_ratio = 0.0
+num_cycles = args.cycles
 if args.rst:
   wandb_group += "RSTMix"
 elif args.pos:
@@ -207,22 +207,19 @@ elif args.pos:
 else:
   wandb_group += "Vanilla"
 if args.lokr:
-  wandb_group += "LoKr"
+  wandb_group += "_LoKr"
 wandb_group += f"_{num_cycles}_Cycles"
 wandb_group += f"_{warmup_ratio}_WarmR"
 
 for run_idx in range(args.runs):
   # define run name
-  run_init_time = time.strftime("%Y-%m-%d_%H-%M-%S")
-
   group_name = (f"{wandb_group}_"
                 f"{args.epochs}_Epochs")
 
-  prefix_run = f"{group_name}_run-{run_idx}"
+  prefix_run = f"{dataset_name}_{group_name}_run-{run_idx}"
 
   out_dir = f"checkpoints/{prefix_run}"
-  run_name = f"{prefix_run}_{run_init_time}"
-  logger.info(f"Run name: {run_name}")
+  logger.info(f"Run name: {prefix_run}")
 
   data_collator = DataCollatorWithPadding(tokenizer)
 
@@ -241,7 +238,7 @@ for run_idx in range(args.runs):
     else:
       labels = dataset["train"]["label"]
     class_weights = torch.tensor([1 / count for count in np.bincount(labels)],
-                                device="cuda")
+                                 device="cuda")
     # commonstories: [0.4003, 0.5997]
     class_weights = class_weights / class_weights.sum()
     # convert tensor to float
@@ -261,7 +258,7 @@ for run_idx in range(args.runs):
     logger.info("Overwriting the embeddings to have better results")
     input_embeddings = model.get_input_embeddings().weight.data
     input_embeddings_avg = input_embeddings[:-num_new_tokens].mean(dim=0,
-                                                                  keepdim=True)
+                                                                   keepdim=True)
     input_embeddings[-num_new_tokens:] = input_embeddings_avg
     logger.success("Embeddings overwritten")
 
@@ -323,7 +320,7 @@ for run_idx in range(args.runs):
       greater_is_better=True,
       eval_on_start=True,
       seed=np.random.randint(0, 1000),
-      run_name=run_name,
+      run_name=prefix_run,
   )
 
   trainer = WeightedTrainer(
