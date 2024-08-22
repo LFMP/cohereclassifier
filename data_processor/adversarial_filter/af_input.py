@@ -1,3 +1,4 @@
+import argparse
 import os
 import random
 
@@ -28,7 +29,7 @@ class AFDataset:
     This process is dataset-specific format. We spect the dataset has the
     following columns:
     - text_id: the unique identifier of the text (UUIDv4)
-    - text: the original text
+    - text/story: the original text
     - plot: the extracted plot from the original text
     - recreated_from: the id of the plot that was recreated from. id ==
       recreated_from means the text is not a recreation.
@@ -48,8 +49,11 @@ class AFDataset:
     - text_id_0 to text_id_n: the id of the text_0 to text_n
     - label_0 label_n: the label of the text_0 to text_n
     """
-    # Create a new dataset
+    # Rename the text column to 'text'
+    if 'story' in self.ds.column_names:
+      self.ds = self.ds.rename_column('story', 'text')
 
+    # Create a new dataset
     new_dataset: dict[str, list] = {
         'cluster_id': [],
         'dataset': [],
@@ -100,3 +104,22 @@ class AFDataset:
     self.ds = self.ds.class_encode_column('dataset')
     for idx in range(self.total_texts):
       self.ds = self.ds.class_encode_column(f"label_{idx}")
+
+
+if __name__ == '__main__':
+  argparse = argparse.ArgumentParser()
+  argparse.add_argument('--dataset', type=str, required=True)
+  argparse.add_argument('--num_true_texts', type=int, default=2)
+  argparse.add_argument('--num_false_texts', type=int, default=6)
+  argparse.add_argument('--num_proc', type=int, default=20)
+  args = argparse.parse_args()
+
+  # Load the dataset
+  ds = load_from_disk(args.dataset)
+  # Create the AF dataset
+  af_ds = AFDataset(ds, args.num_true_texts, args.num_false_texts,
+                    args.num_proc)
+  # Save the dataset
+  normalized_path = os.path.normpath(args.dataset)
+  ds_name = os.path.basename(normalized_path)
+  af_ds.ds.save_to_disk(f'processed/{ds_name}_af_input')
