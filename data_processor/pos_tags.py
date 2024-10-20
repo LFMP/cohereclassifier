@@ -14,7 +14,7 @@ def get_pos_tags(model: str = "en_core_web_trf"):
 
   for pattern in patterns:
     attrs: dict = pattern['attrs']
-    pos_tag = attrs.get('POS', None)
+    pos_tag = attrs.get('TAG', None)
     if pos_tag is not None:
       pos_set.add(pos_tag)
 

@@ -22,6 +22,7 @@ parser.add_argument('--tokenizer',
                     default="severinsimmler/xlm-roberta-longformer-base-16384")
 parser.add_argument('--batch_size', type=int, default=50)
 parser.add_argument('--prefix', type=str, default='gcdc')
+parser.add_argument('--exclude', type=str, default='')
 parser.add_argument('--debug', action='store_true')
 args = parser.parse_args()
 
@@ -39,8 +40,15 @@ def inference(examples,
 
 ds = datasets.load_from_disk(args.dataset_path)
 
-checkpoints = sorted(
-    [f"checkpoints/{c}" for c in os.listdir("checkpoints") if args.prefix in c])
+if args.exclude != "":
+  checkpoints = sorted([
+      f"checkpoints/{c}" for c in os.listdir("checkpoints")
+      if args.prefix in c and args.exclude not in c
+  ])
+else:
+  checkpoints = sorted([
+      f"checkpoints/{c}" for c in os.listdir("checkpoints") if args.prefix in c
+  ])
 
 for idx, c in enumerate(checkpoints):
   # load model
@@ -112,4 +120,4 @@ for idx, c in enumerate(checkpoints):
   )
 
 dataset_name = os.path.basename(os.path.normpath(args.dataset_path)).lower()
-ds.save_to_disk(f"data/{args.prefix}_in_{dataset_name}_scores")
+ds.save_to_disk(f"results/{args.prefix}_in_{dataset_name}_scores")

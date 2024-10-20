@@ -19,7 +19,7 @@ class FakeTrueBr:
         model_path=
         "data_processor/dmrst_parser/checkpoint/multi_all_checkpoint.torchsave")
     self.rst_mixer = RSTMix()
-    self.pos_mixer = POSMix()
+    self.pos_mixer = POSMix(model="pt_core_news_lg")
 
   def parse_rst(self, examples: dict):
     return self.parser.inference(examples, field="text")

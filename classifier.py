@@ -19,8 +19,9 @@ import wandb
 from data_processor.commonstories import CommonStories
 from data_processor.ftbr import FakeTrueBr
 from data_processor.gcdc import GCDC
-from data_processor.pos_tags import POS_TAGS_COMPILED
+from data_processor.pos_tags import POS_TAGS_COMPILED, get_pos_tags
 from data_processor.rst_tags import RST_TAGS_COMPILED
+from data_processor.translated import Translated
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
@@ -31,7 +32,7 @@ parser.add_argument(
 parser.add_argument(
     '--batch_size',
     type=int,
-    default=1,
+    default=5,
 )
 parser.add_argument('--epochs', type=int, default=10)
 parser.add_argument('--tokenizer',
@@ -40,7 +41,8 @@ parser.add_argument('--tokenizer',
 parser.add_argument('--rst', action='store_true')
 parser.add_argument('--pos', action='store_true')
 parser.add_argument('--lokr', action='store_true')
-parser.add_argument('--lr', type=float, default=5e-5)
+parser.add_argument('--lr', type=float, default=1e-5)
+parser.add_argument('--wr', type=float, default=0.0)
 parser.add_argument('--processed', action='store_true')
 parser.add_argument('--runs', type=int, default=5)
 parser.add_argument('--cycles', type=int, default=1)
@@ -55,27 +57,33 @@ def load_dataset(dataset_path=args.dataset_path):
     dataset_name = dataset_name.replace("_af_output", "")
   if args.processed:
     dataset = datasets.load_from_disk(dataset_path)
+  elif "_br" in dataset_name:
+    dataset = datasets.load_dataset(dataset_path)
+    dataset = Translated(dataset).process()
+    logger.info("Saving processed dataset to disk for future use in processed/")
+    dataset.save_to_disk(f"processed/{dataset_name}")
   else:
     if "gcdc" in dataset_name:
       # load dataset to process
       dataset = GCDC(dataset_path, batch_size=args.batch_size).load_dataset()
       logger.info(
-          "Saving processed dataset to disk for future use in data/gcdc")
-      dataset.save_to_disk("data/gcdc")
+          "Saving processed dataset to disk for future use in processed/gcdc")
+      dataset.save_to_disk("processed/gcdc")
     elif "faketrue" in dataset_name:
       dataset = FakeTrueBr(dataset_path,
                            batch_size=args.batch_size).load_dataset()
       logger.info(
-          "Saving processed dataset to disk for future use in data/faketrue")
-      dataset.save_to_disk("data/faketrue")
+          "Saving processed dataset to disk for future use in processed/faketruebr"
+      )
+      dataset.save_to_disk("processed/faketrue")
     else:
       dataset = datasets.load_from_disk(dataset_path)
       logger.info("Processing dataset")
       dataset = CommonStories(dataset).process_dataset()
       logger.info(
-          f"Saving processed dataset to disk for future use in data/{dataset_name}"
+          f"Saving processed dataset to disk for future use in processed/{dataset_name}"
       )
-      dataset.save_to_disk(f"data/{dataset_name}")
+      dataset.save_to_disk(f"processed/{dataset_name}")
   return dataset
 
 
@@ -130,7 +138,9 @@ dataset_name = os.path.basename(normalized_path).lower()
 
 logger.info(f"Loading dataset {dataset_name}")
 dataset = load_dataset()
+eval_steps = 1000
 if "gcdc" in dataset_name:
+  eval_steps = 52
   for d in dataset:
     # actual gcdc labels are {0,1,2}, transformed to [0, 2]
     dataset[d] = dataset[d].filter(lambda e: e["label"] != 1)
@@ -153,6 +163,10 @@ logger.info("Tokenizer loaded")
 
 embedding_size = len(tokenizer)
 num_new_tokens = 0
+if "br" in dataset_name:
+  pos_tags = get_pos_tags(model="pt_core_news_lg")
+else:
+  pos_tags = POS_TAGS_COMPILED
 if args.rst:
   logger.info("Adding RST tags to tokenizer")
   num_new_tokens = tokenizer.add_special_tokens(
@@ -163,7 +177,7 @@ if args.rst:
 elif args.pos:
   logger.info("Adding POS tags to tokenizer")
   num_new_tokens = tokenizer.add_special_tokens(
-      {"additional_special_tokens": POS_TAGS_COMPILED})
+      {"additional_special_tokens": pos_tags})
   logger.success(
       f"{num_new_tokens} POS tags added to tokenizer (from {embedding_size}) to {len(tokenizer)})"
   )
@@ -198,18 +212,19 @@ tokenized_datasets.set_format("torch")
 logger.success("Dataset tokenized")
 
 wandb_group = ""
-warmup_ratio = 0.0
+warmup_ratio = args.wr
 num_cycles = args.cycles
 if args.rst:
   wandb_group += "RSTMix"
 elif args.pos:
-  wandb_group += "POSix"
+  wandb_group += "POSMix"
 else:
   wandb_group += "Vanilla"
 if args.lokr:
   wandb_group += "_LoKr"
 wandb_group += f"_{num_cycles}_Cycles"
 wandb_group += f"_{warmup_ratio}_WarmR"
+wandb_group += f"_{args.lr}_lr"
 
 for run_idx in range(args.runs):
   # define run name
@@ -234,7 +249,10 @@ for run_idx in range(args.runs):
   class_weights = None
   if "train" in dataset:
     if "gcdc" not in dataset_name:
-      labels = dataset["train"]["label"].tolist()
+      if type(dataset["train"]["label"]) == list:
+        labels = dataset["train"]["label"]
+      else:
+        labels = dataset["train"]["label"].tolist()
     else:
       labels = dataset["train"]["label"]
     class_weights = torch.tensor([1 / count for count in np.bincount(labels)],
@@ -298,8 +316,10 @@ for run_idx in range(args.runs):
   training_args = TrainingArguments(
       output_dir=out_dir,
       logging_dir="./logs",
-      eval_strategy="epoch",
-      save_strategy="epoch",
+      eval_strategy="steps",
+      eval_steps=eval_steps,
+      save_steps=eval_steps,
+      save_strategy="steps",
       logging_steps=1,
       load_best_model_at_end=True,
       overwrite_output_dir=True,
@@ -314,6 +334,7 @@ for run_idx in range(args.runs):
       lr_scheduler_kwargs={"num_cycles": num_cycles},
       gradient_checkpointing=True,
       gradient_checkpointing_kwargs={"use_reentrant": False},
+      max_grad_norm=1.0,
       label_names=["labels"],
       report_to="wandb",
       metric_for_best_model="eval_balanced_accuracy",

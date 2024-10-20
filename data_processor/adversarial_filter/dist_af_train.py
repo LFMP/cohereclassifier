@@ -1,4 +1,5 @@
 import argparse
+import os
 from itertools import combinations
 from random import shuffle
 from typing import Any, Dict, List
@@ -24,16 +25,8 @@ import wandb
 
 def argument_parser():
   parser = argparse.ArgumentParser()
-  parser.add_argument(
-      '--dataset_path',
-      type=str,
-      required=True,
-  )
-  parser.add_argument(
-      '--batch_size',
-      type=int,
-      default=5,
-  )
+  parser.add_argument('--dataset_path', type=str, required=True)
+  parser.add_argument('--batch_size', type=int, default=5)
   parser.add_argument(
       '--tokenizer',
       type=str,
@@ -347,9 +340,19 @@ if args.debug:
   args.iterations = 3
   args.combinations = 2
   tags.append("debug")
+  max_steps = 10
+else:
+  max_steps = 2000
 
 if args.lokr:
   tags.append("lokr")
+
+normalized_dataset_path = os.path.normpath(args.dataset_path)
+dataset_name = os.path.basename(normalized_dataset_path)
+if "_af_input" in dataset_name:
+  dataset_name = dataset_name.replace("_af_input", "")
+if "_filtered" in dataset_name:
+  dataset_name = dataset_name.replace("_filtered", "")
 
 for idx_iter in range(args.iterations):
   logger.info("Loading base model")
@@ -374,8 +377,8 @@ for idx_iter in range(args.iterations):
   if args.lokr:
     logger.info("Creating Lokr model")
     config = LoKrConfig(
-        r=8,
-        alpha=8,
+        r=16,
+        alpha=32,
         target_modules=target_modules,
         inference_mode=False,
         use_effective_conv2d=True,
@@ -383,6 +386,7 @@ for idx_iter in range(args.iterations):
     )
     model = get_peft_model(base_model, config)
     logger.success(f"Lokr model created")
+    model.print_trainable_parameters()
   else:
     model = base_model
 
@@ -391,7 +395,7 @@ for idx_iter in range(args.iterations):
 
   class_weight = torch.Tensor([1.0 / args.num_texts, 1.0] /
                               np.sum([1.0 / args.num_texts, 1.0]) * 2)
-
+  logger.info(f"Class weights: {class_weight}")
   logger.info("Splitting dataset")
   # 70% train, 30% test + validation
   train_testvalid: DatasetDict = best_tokenized_dataset.train_test_split(
@@ -405,36 +409,39 @@ for idx_iter in range(args.iterations):
       'val': test_valid['train']
   })
   logger.success("Dataset splitted")
-  model_name = f"af_models/model_{idx_iter}_{args.iterations}_{args.num_texts}_{args.num_combinations}"
+  run_name = f"{idx_iter}_{args.iterations}_{args.num_texts}_{args.num_combinations}"
+  model_name = f"af_models/{dataset_name}_model_{run_name}"
   run = wandb.init(
       project=f"adversarial_filtering",
       tags=tags,
       reinit=True,
-      group=f"af_{args.iterations}_{args.num_texts}_{args.num_combinations}",
+      group=
+      f"{dataset_name}_{args.iterations}_{args.num_texts}_{args.num_combinations}",
       name=model_name.split("/")[-1],
   )
 
   # Define training arguments
   training_args = TrainingArguments(
       output_dir=model_name,
-      eval_strategy="epoch",
-      save_strategy="epoch",
+      eval_strategy="no",
+      save_strategy="no",
       overwrite_output_dir=True,
       learning_rate=5e-5,
       warmup_ratio=0.1,
       auto_find_batch_size=True,
+      per_device_eval_batch_size=1,
       gradient_checkpointing=True,
       gradient_checkpointing_kwargs={"use_reentrant": False},
       bf16=True,
       group_by_length=True,
       bf16_full_eval=True,
-      num_train_epochs=1,
+      max_steps=max_steps,
       logging_steps=1,
       label_names=["labels"],
       remove_unused_columns=False,
       report_to="wandb",
       seed=np.random.randint(0, 1000),
-      run_name=model_name.split("/")[-1],
+      run_name=run_name,
   )
 
   trainer = WeightedTrainer(
@@ -455,13 +462,22 @@ for idx_iter in range(args.iterations):
   # train model
   logger.info(f"Training model {idx_iter}")
   trainer.train()
-  logger.info(f"Evaluating model {idx_iter}")
-  metrics = trainer.evaluate(dataset["val"])
-  wandb.log(metrics)
-  logger.success(f"Model {idx_iter} evaluated")
+  try:
+    logger.info(f"Evaluating model {idx_iter}")
+    metrics = trainer.evaluate(dataset["val"])
+    logger.info(f"Metrics of model {idx_iter}")
+    logger.success(metrics)
+    wandb.log(metrics)
+    logger.success(f"Model {idx_iter} evaluated")
+  except Exception as e:
+    logger.error(f"Error evaluating model {idx_iter}")
+    logger.error(e)
   if not args.lokr:
     trainer.save_model(model_name)
-  logger.success(f"Model {idx_iter} trained and saved")
+    logger.success(f"Model {idx_iter} trained and saved")
+  else:
+    trainer.save_model(model_name)
+    logger.success(f"Model {idx_iter} trained and saved")
   if args.lokr:
     logger.info("Loading base model and merging with PEFT model")
     base_model = trainer.model.base_model
@@ -483,10 +499,10 @@ for idx_iter in range(args.iterations):
   best_tokenized_dataset = best_dataset(best_tokenized_dataset,
                                         new_tokenized_dataset)
   best_tokenized_dataset.save_to_disk(
-      f"data/new_af_out_{args.iterations}_{args.num_texts}_{args.num_combinations}"
+      f"processed/{dataset_name}_af_out_{args.iterations}_{args.num_texts}_{args.num_combinations}"
   )
 wandb.finish()
 best_tokenized_dataset.remove_columns(["input_ids", "attention_mask"])
 best_tokenized_dataset.save_to_disk(
-    f"data/new_af_out_{args.iterations}_{args.num_texts}_{args.num_combinations}"
+    f"processed/{dataset_name}_af_out_{args.iterations}_{args.num_texts}_{args.num_combinations}"
 )

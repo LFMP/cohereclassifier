@@ -334,3 +334,4 @@ results/
 wandb/
 *.ipynb
 *.torchsave
+*.csv

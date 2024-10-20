@@ -40,6 +40,15 @@ def batched_encode_function(examples: Dict[str, Any],
                             tokenizer) -> Dict[str, Any]:
   # gather the texts
   texts_columns: List[str] = [clm for clm in examples.keys() if 'text_' in clm]
+  label_columns: List[str] = [clm for clm in examples.keys() if 'label_' in clm]
+  if len(label_columns) != 0:
+    labels: List[List[float]] = [[
+        float(examples[clm][idx]) for clm in label_columns
+    ] for idx in range(len(examples[label_columns[0]]))]
+  else:
+    labels = examples['labels'].tolist()
+  ids_true: List[List[int]] = [np.flatnonzero(lb).tolist() for lb in labels]
+  examples['ids_true'] = ids_true
   true_texts: List[int] = [example[0] for example in examples['ids_true']]
   original_plots: List[str] = [
       examples[f'plot_{id}'][idx] for idx, id in enumerate(true_texts)
@@ -68,7 +77,6 @@ def batched_encode_function(examples: Dict[str, Any],
     for k, v in example.items():
       if k not in examples:
         examples[k] = []
-      print(k)
       examples[k].append(v)
 
   return examples
